@@ -110,6 +110,7 @@
           <div class="field-row">
             <label for="input-zone-url">URL</label>
             <input type="url" id="input-zone-url" placeholder="https://example.com">
+            <div class="url-feedback" id="zone-url-feedback"></div>
           </div>
           <div class="field-row">
             <label>Color</label>
@@ -130,18 +131,40 @@
 
           <div class="setting-row">
             <div class="setting-label-row">
-              <label>Red Threshold</label>
-              <span class="setting-value" id="val-red-threshold">150</span>
+              <label>Detection Mode</label>
             </div>
-            <input type="range" id="slider-red-threshold" min="50" max="254" value="150">
+            <select id="select-detection-mode">
+              <option value="laser">Laser (red beam)</option>
+              <option value="finger">Finger (hand tracking)</option>
+            </select>
           </div>
 
-          <div class="setting-row">
+          <div class="setting-row" id="setting-hand-side" style="display:none;">
             <div class="setting-label-row">
-              <label>Min Pixel Count</label>
-              <span class="setting-value" id="val-min-pixels">3</span>
+              <label>Hand Side</label>
             </div>
-            <input type="range" id="slider-min-pixels" min="1" max="50" value="3">
+            <select id="select-hand-side">
+              <option value="right">Right hand</option>
+              <option value="left">Left hand</option>
+            </select>
+          </div>
+
+          <div id="laser-settings">
+            <div class="setting-row">
+              <div class="setting-label-row">
+                <label>Red Threshold</label>
+                <span class="setting-value" id="val-red-threshold">150</span>
+              </div>
+              <input type="range" id="slider-red-threshold" min="50" max="254" value="150">
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-label-row">
+                <label>Min Pixel Count</label>
+                <span class="setting-value" id="val-min-pixels">3</span>
+              </div>
+              <input type="range" id="slider-min-pixels" min="1" max="50" value="3">
+            </div>
           </div>
 
           <div class="setting-row">
@@ -211,6 +234,7 @@
         <div class="field-row">
           <label for="modal-zone-url">URL to display</label>
           <input type="url" id="modal-zone-url" placeholder="https://example.com">
+          <div class="url-feedback" id="modal-url-feedback"></div>
         </div>
         <div class="field-row">
           <label>Zone Color</label>

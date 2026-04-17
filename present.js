@@ -13,7 +13,9 @@ const state = {
     minPixelCount: 3,
     debounceFocusMs: 400,
     debounceSwitchMs: 1500,
-    debounceMessageMs: 3000
+    debounceMessageMs: 3000,
+    detectionMode: 'laser',
+    handSide: 'right'
   },
   zones: [],
   currentZoneId: null,
@@ -50,6 +52,75 @@ videoEl.playsInline = true;
 videoEl.style.display = 'none';
 document.body.appendChild(videoEl);
 
+// ── Hand tracking state ──────────────────────────────────
+let handsInstance = null;
+let lastFingerTip = null;
+let handTrackingBusy = false;
+
+const MEDIAPIPE_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js';
+
+// Distance ratio thresholds for pointing gesture detection
+const INDEX_EXTENSION_THRESHOLD = 1.2; // index tip must be ≥ this × PIP dist from wrist
+const FINGER_CURL_THRESHOLD = 1.1;     // other finger tips must be < this × PIP dist from wrist
+
+function dist2D(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function isIndexPointing(landmarks) {
+  const w = landmarks[0];
+  const indexExtended = dist2D(landmarks[8], w) > dist2D(landmarks[6], w) * INDEX_EXTENSION_THRESHOLD;
+  const middleCurled  = dist2D(landmarks[12], w) < dist2D(landmarks[10], w) * FINGER_CURL_THRESHOLD;
+  const ringCurled    = dist2D(landmarks[16], w) < dist2D(landmarks[14], w) * FINGER_CURL_THRESHOLD;
+  const pinkyCurled   = dist2D(landmarks[20], w) < dist2D(landmarks[18], w) * FINGER_CURL_THRESHOLD;
+  return indexExtended && middleCurled && ringCurled && pinkyCurled;
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function initHandTracking() {
+  if (handsInstance) return;
+  try {
+    if (typeof Hands === 'undefined') await loadScript(MEDIAPIPE_CDN); // eslint-disable-line no-undef
+  } catch (err) {
+    console.warn('Presenter: hand tracking library unavailable.', err.message);
+    return;
+  }
+  handsInstance = new Hands({ // eslint-disable-line no-undef
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`
+  });
+  handsInstance.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 0,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.5
+  });
+  handsInstance.onResults((results) => {
+    handTrackingBusy = false;
+    lastFingerTip = null;
+    if (!results.multiHandLandmarks || !results.multiHandLandmarks.length) return;
+    let handIdx = 0;
+    if (results.multiHandedness && results.multiHandedness.length > 1) {
+      const wanted = state.settings.handSide;
+      const idx = results.multiHandedness.findIndex(h => h.label.toLowerCase() === wanted);
+      if (idx !== -1) handIdx = idx;
+    }
+    const landmarks = results.multiHandLandmarks[handIdx];
+    if (!isIndexPointing(landmarks)) return;
+    const tip = landmarks[8];
+    lastFingerTip = { x: tip.x * captureCanvas.width, y: tip.y * captureCanvas.height };
+  });
+}
+
 // ── Storage ─────────────────────────────────────────────
 function loadSettings() {
   try {
@@ -64,8 +135,13 @@ function loadSettings() {
 // Re-load settings when the editor updates them
 window.addEventListener('storage', (e) => {
   if (e.key === STORAGE_KEY) {
+    const prevMode = state.settings.detectionMode;
     loadSettings();
     renderMask();
+    // Re-initialize hand tracking if detection mode changed
+    if (state.settings.detectionMode === 'finger' && prevMode !== 'finger' && state.videoReady) {
+      initHandTracking();
+    }
   }
 });
 
@@ -156,6 +232,7 @@ async function startCamera() {
       maskCanvas.width = videoEl.videoWidth;
       maskCanvas.height = videoEl.videoHeight;
       renderMask();
+      if (state.settings.detectionMode === 'finger') initHandTracking();
       requestAnimationFrame(detectLoop);
     };
   } catch (err) {
@@ -193,7 +270,17 @@ function detectLoop(ts) {
   if (ts - lastDetect < 33) return;  // cap at ~30fps
   lastDetect = ts;
 
-  const pt = detectLaserInFrame();
+  let pt;
+  if (state.settings.detectionMode === 'finger') {
+    if (handsInstance && !handTrackingBusy) {
+      handTrackingBusy = true;
+      handsInstance.send({ image: videoEl }).catch(() => { handTrackingBusy = false; });
+    }
+    pt = lastFingerTip;
+  } else {
+    pt = detectLaserInFrame();
+  }
+
   if (pt) {
     const zone = getZoneAtPoint(pt.x, pt.y);
     if (zone) {
@@ -201,7 +288,7 @@ function detectLoop(ts) {
       return;
     }
   }
-  // No laser found — cancel pending
+  // No pointer found — cancel pending
   if (state.pendingZoneId) cancelPending();
 }
 

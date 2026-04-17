@@ -51,7 +51,9 @@ const state = {
     minPixelCount: 3,
     debounceFocusMs: 400,
     debounceSwitchMs: 1500,
-    debounceMessageMs: 3000
+    debounceMessageMs: 3000,
+    detectionMode: 'laser',  // 'laser' | 'finger'
+    handSide: 'right'        // 'left' | 'right'
   }
 };
 
@@ -77,6 +79,7 @@ const dom = {
   zoneEditorSection: document.getElementById('zone-editor-section'),
   inputZoneName: document.getElementById('input-zone-name'),
   inputZoneUrl: document.getElementById('input-zone-url'),
+  zoneUrlFeedback: document.getElementById('zone-url-feedback'),
   colorSwatches: document.getElementById('color-swatches'),
   btnApplyZone: document.getElementById('btn-apply-zone'),
 
@@ -101,12 +104,18 @@ const dom = {
   sliderDebounceMsg: document.getElementById('slider-debounce-msg'),
   valDebounceMsg: document.getElementById('val-debounce-msg'),
 
+  selectDetectionMode: document.getElementById('select-detection-mode'),
+  selectHandSide: document.getElementById('select-hand-side'),
+  settingHandSide: document.getElementById('setting-hand-side'),
+  laserSettings: document.getElementById('laser-settings'),
+
   zoneModal: document.getElementById('zone-modal'),
   modalClose: document.getElementById('modal-close'),
   modalCancel: document.getElementById('modal-cancel'),
   modalConfirm: document.getElementById('modal-confirm'),
   modalZoneName: document.getElementById('modal-zone-name'),
   modalZoneUrl: document.getElementById('modal-zone-url'),
+  modalUrlFeedback: document.getElementById('modal-url-feedback'),
   modalColorSwatches: document.getElementById('modal-color-swatches'),
 
   toast: document.getElementById('toast'),
@@ -125,6 +134,11 @@ const maskCtx = maskCanvas.getContext('2d');
 // Off-screen capture canvas for frame analysis
 const captureCanvas = document.createElement('canvas');
 const captureCtx = captureCanvas.getContext('2d', { willReadFrequently: true });
+
+// ── Hand tracking state ──────────────────────────────────
+let handsInstance = null;
+let lastFingerTip = null;   // {x, y} in video pixel coords, or null
+let handTrackingBusy = false;
 
 // ── Utilities ───────────────────────────────────────────
 function uid() {
@@ -169,6 +183,147 @@ function rgbMatch(r, g, b, hex, tolerance = 8) {
   const c = hexToRgb(hex);
   if (!c) return false;
   return Math.abs(r - c.r) < tolerance && Math.abs(g - c.g) < tolerance && Math.abs(b - c.b) < tolerance;
+}
+
+// ── URL helpers ─────────────────────────────────────────
+// Matches any valid URL scheme (e.g. http://, https://, ftp://)
+const URL_PROTOCOL_RE = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//;
+const URL_CHECK_TIMEOUT_MS = 8000;
+const URL_DEBOUNCE_MS = 600;
+
+function normalizeUrl(url) {
+  const s = url.trim();
+  if (!s) return s;
+  if (!URL_PROTOCOL_RE.test(s)) return 'http://' + s;
+  return s;
+}
+
+async function runUrlCheck(inputEl, feedbackEl) {
+  const raw = inputEl.value.trim();
+  if (!raw) { feedbackEl.textContent = ''; feedbackEl.className = 'url-feedback'; return; }
+  const url = normalizeUrl(raw);
+  if (url !== raw) inputEl.value = url;
+  try { new URL(url); } catch {
+    feedbackEl.textContent = 'Invalid URL format';
+    feedbackEl.className = 'url-feedback error';
+    return;
+  }
+  feedbackEl.textContent = 'Checking…';
+  feedbackEl.className = 'url-feedback checking';
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), URL_CHECK_TIMEOUT_MS);
+  try {
+    await fetch(url, { mode: 'no-cors', signal: controller.signal });
+    clearTimeout(tid);
+    feedbackEl.textContent = '✓ Reachable';
+    feedbackEl.className = 'url-feedback ok';
+  } catch (err) {
+    clearTimeout(tid);
+    feedbackEl.textContent = err.name === 'AbortError' ? '⚠ Timed out' : '✗ Not reachable';
+    feedbackEl.className = 'url-feedback ' + (err.name === 'AbortError' ? 'warn' : 'error');
+  }
+}
+
+function setupUrlChecker(inputEl, feedbackEl) {
+  let timer = null;
+  inputEl.addEventListener('input', () => {
+    feedbackEl.textContent = '';
+    feedbackEl.className = 'url-feedback';
+    clearTimeout(timer);
+    if (!inputEl.value.trim()) return;
+    timer = setTimeout(() => runUrlCheck(inputEl, feedbackEl), URL_DEBOUNCE_MS);
+  });
+  inputEl.addEventListener('blur', () => {
+    clearTimeout(timer);
+    const normalized = normalizeUrl(inputEl.value);
+    if (normalized !== inputEl.value) inputEl.value = normalized;
+    if (inputEl.value.trim()) runUrlCheck(inputEl, feedbackEl);
+  });
+}
+
+// ── Hand tracking helpers ────────────────────────────────
+// Distance ratio thresholds for pointing gesture detection
+const INDEX_EXTENSION_THRESHOLD = 1.2; // index tip must be ≥ this × PIP dist from wrist
+const FINGER_CURL_THRESHOLD = 1.1;     // other finger tips must be < this × PIP dist from wrist
+
+function dist2D(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function isIndexPointing(landmarks) {
+  const w = landmarks[0]; // wrist
+  const indexExtended = dist2D(landmarks[8], w) > dist2D(landmarks[6], w) * INDEX_EXTENSION_THRESHOLD;
+  const middleCurled  = dist2D(landmarks[12], w) < dist2D(landmarks[10], w) * FINGER_CURL_THRESHOLD;
+  const ringCurled    = dist2D(landmarks[16], w) < dist2D(landmarks[14], w) * FINGER_CURL_THRESHOLD;
+  const pinkyCurled   = dist2D(landmarks[20], w) < dist2D(landmarks[18], w) * FINGER_CURL_THRESHOLD;
+  return indexExtended && middleCurled && ringCurled && pinkyCurled;
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+const MEDIAPIPE_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js';
+
+async function initHandTracking() {
+  if (handsInstance) return;
+  showToast('Loading hand tracking model…', 6000);
+  try {
+    if (typeof Hands === 'undefined') await loadScript(MEDIAPIPE_CDN);
+  } catch (err) {
+    showToast('Failed to load hand tracking — check internet connection');
+    state.settings.detectionMode = 'laser';
+    dom.selectDetectionMode.value = 'laser';
+    updateDetectionModeUI();
+    return;
+  }
+  handsInstance = new Hands({ // eslint-disable-line no-undef
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`
+  });
+  handsInstance.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 0,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.5
+  });
+  handsInstance.onResults((results) => {
+    handTrackingBusy = false;
+    lastFingerTip = null;
+    if (!results.multiHandLandmarks || !results.multiHandLandmarks.length) return;
+    let handIdx = 0;
+    if (results.multiHandedness && results.multiHandedness.length > 1) {
+      const wanted = state.settings.handSide;
+      const idx = results.multiHandedness.findIndex(h => h.label.toLowerCase() === wanted);
+      if (idx !== -1) handIdx = idx;
+    }
+    const landmarks = results.multiHandLandmarks[handIdx];
+    if (!isIndexPointing(landmarks)) return;
+    const tip = landmarks[8];
+    lastFingerTip = { x: tip.x * captureCanvas.width, y: tip.y * captureCanvas.height };
+  });
+  showToast('Hand tracking ready');
+}
+
+function cleanupHandTracking() {
+  if (handsInstance) {
+    try { handsInstance.close(); } catch (e) { /* ignore */ }
+    handsInstance = null;
+  }
+  handTrackingBusy = false;
+  lastFingerTip = null;
+}
+
+function updateDetectionModeUI() {
+  const isFinger = state.settings.detectionMode === 'finger';
+  dom.settingHandSide.style.display = isFinger ? '' : 'none';
+  dom.laserSettings.style.display = isFinger ? 'none' : '';
 }
 
 // ── Storage ─────────────────────────────────────────────
@@ -341,7 +496,17 @@ function detectionLoop(ts) {
   if (detectionCooldown >= 30) {
     detectionCooldown = 0;
 
-    const pt = detectLaserInFrame();
+    let pt;
+    if (state.settings.detectionMode === 'finger') {
+      if (handsInstance && !handTrackingBusy) {
+        handTrackingBusy = true;
+        handsInstance.send({ image: dom.video }).catch(() => { handTrackingBusy = false; });
+      }
+      pt = lastFingerTip;
+    } else {
+      pt = detectLaserInFrame();
+    }
+
     laserCtx.clearRect(0, 0, dom.laserCanvas.width, dom.laserCanvas.height);
 
     if (pt) {
@@ -349,23 +514,36 @@ function detectionLoop(ts) {
       const cx = (pt.x / captureCanvas.width) * dom.laserCanvas.width;
       const cy = (pt.y / captureCanvas.height) * dom.laserCanvas.height;
 
-      // Draw laser indicator
+      // Draw pointer indicator
       laserCtx.save();
-      laserCtx.strokeStyle = 'rgba(255,60,60,0.9)';
-      laserCtx.lineWidth = 1.5;
-      laserCtx.beginPath();
-      laserCtx.arc(cx, cy, 10, 0, Math.PI * 2);
-      laserCtx.stroke();
-      laserCtx.strokeStyle = 'rgba(255,60,60,0.5)';
-      laserCtx.beginPath();
-      laserCtx.arc(cx, cy, 18, 0, Math.PI * 2);
-      laserCtx.stroke();
+      if (state.settings.detectionMode === 'finger') {
+        laserCtx.strokeStyle = 'rgba(45,125,210,0.9)';
+        laserCtx.lineWidth = 2;
+        laserCtx.beginPath();
+        laserCtx.arc(cx, cy, 12, 0, Math.PI * 2);
+        laserCtx.stroke();
+        laserCtx.strokeStyle = 'rgba(45,125,210,0.4)';
+        laserCtx.beginPath();
+        laserCtx.arc(cx, cy, 20, 0, Math.PI * 2);
+        laserCtx.stroke();
+      } else {
+        laserCtx.strokeStyle = 'rgba(255,60,60,0.9)';
+        laserCtx.lineWidth = 1.5;
+        laserCtx.beginPath();
+        laserCtx.arc(cx, cy, 10, 0, Math.PI * 2);
+        laserCtx.stroke();
+        laserCtx.strokeStyle = 'rgba(255,60,60,0.5)';
+        laserCtx.beginPath();
+        laserCtx.arc(cx, cy, 18, 0, Math.PI * 2);
+        laserCtx.stroke();
+      }
       laserCtx.restore();
 
       // Hit test
       const zone = getZoneAtPoint(pt.x, pt.y);
       dom.detectionDot.classList.add('active');
-      dom.statusDetection.textContent = pt ? `Laser at (${Math.round(pt.x)}, ${Math.round(pt.y)})` : '';
+      const label = state.settings.detectionMode === 'finger' ? 'Finger' : 'Laser';
+      dom.statusDetection.textContent = `${label} at (${Math.round(pt.x)}, ${Math.round(pt.y)})`;
 
       if (zone) {
         dom.statusZone.textContent = zone.name;
@@ -381,7 +559,9 @@ function detectionLoop(ts) {
       }
     } else {
       dom.detectionDot.classList.remove('active');
-      dom.statusDetection.textContent = 'No laser detected';
+      dom.statusDetection.textContent = state.settings.detectionMode === 'finger'
+        ? 'No pointing gesture detected'
+        : 'No laser detected';
       dom.statusZone.textContent = '—';
       if (dom.activeZoneLabel) dom.activeZoneLabel.classList.add('hidden');
     }
@@ -404,11 +584,13 @@ function toggleDetection() {
   if (state.detectActive) {
     state.lastFrameTime = performance.now();
     state.fpsSamples = [];
+    if (state.settings.detectionMode === 'finger') initHandTracking();
     state.animFrameId = requestAnimationFrame(detectionLoop);
     dom.btnDetect.textContent = 'Detection On';
     dom.btnDetect.classList.add('active');
   } else {
     cancelAnimationFrame(state.animFrameId);
+    if (state.settings.detectionMode === 'finger') cleanupHandTracking();
     laserCtx.clearRect(0, 0, dom.laserCanvas.width, dom.laserCanvas.height);
     dom.detectionDot.classList.remove('active');
     dom.statusDetection.textContent = 'Detection off';
@@ -473,6 +655,8 @@ function selectZone(id) {
     if (zone) {
       dom.inputZoneName.value = zone.name;
       dom.inputZoneUrl.value = zone.url;
+      dom.zoneUrlFeedback.textContent = '';
+      dom.zoneUrlFeedback.className = 'url-feedback';
       renderColorSwatches(dom.colorSwatches, zone.color, () => {});
       dom.zoneEditorSection.style.display = '';
     }
@@ -786,6 +970,8 @@ function openZoneModal(shape) {
   modalSelectedColor = nextColor();
   dom.modalZoneName.value = 'Zone ' + state.nextZoneIndex;
   dom.modalZoneUrl.value = '';
+  dom.modalUrlFeedback.textContent = '';
+  dom.modalUrlFeedback.className = 'url-feedback';
   renderColorSwatches(dom.modalColorSwatches, modalSelectedColor, (c) => { modalSelectedColor = c; });
   dom.zoneModal.classList.remove('hidden');
   dom.modalZoneName.focus();
@@ -806,9 +992,12 @@ dom.zoneModal.addEventListener('click', (e) => { if (e.target === dom.zoneModal)
 
 dom.modalConfirm.addEventListener('click', () => {
   if (!pendingShapeForModal) return;
+  const rawUrl = dom.modalZoneUrl.value.trim();
+  const url = normalizeUrl(rawUrl);
+  if (url !== rawUrl) dom.modalZoneUrl.value = url;
   const zone = createZone({
     name: dom.modalZoneName.value.trim() || 'Zone ' + state.nextZoneIndex,
-    url: dom.modalZoneUrl.value.trim(),
+    url: url,
     color: modalSelectedColor,
     shapes: [pendingShapeForModal]
   });
@@ -826,9 +1015,12 @@ dom.btnApplyZone.addEventListener('click', () => {
   const zone = state.zones.find(z => z.id === state.selectedZoneId);
   if (!zone) return;
   const newColor = dom.colorSwatches.querySelector('.color-swatch-btn.selected')?.dataset.color || zone.color;
+  const rawUrl = dom.inputZoneUrl.value.trim();
+  const url = normalizeUrl(rawUrl);
+  if (url !== rawUrl) dom.inputZoneUrl.value = url;
   updateZone(state.selectedZoneId, {
     name: dom.inputZoneName.value.trim() || zone.name,
-    url: dom.inputZoneUrl.value.trim(),
+    url: url,
     color: newColor
   });
   showToast('Zone updated');
@@ -995,6 +1187,29 @@ bindSlider(dom.sliderDebounceFocus, dom.valDebounceFocus, 'debounceFocusMs');
 bindSlider(dom.sliderDebounceSwitch, dom.valDebounceSwitch, 'debounceSwitchMs');
 bindSlider(dom.sliderDebounceMsg, dom.valDebounceMsg, 'debounceMessageMs');
 
+// Detection mode & hand side selects
+dom.selectDetectionMode.addEventListener('change', () => {
+  state.settings.detectionMode = dom.selectDetectionMode.value;
+  updateDetectionModeUI();
+  saveState();
+  if (state.detectActive) {
+    if (state.settings.detectionMode === 'finger') {
+      initHandTracking();
+    } else {
+      cleanupHandTracking();
+    }
+  }
+});
+
+dom.selectHandSide.addEventListener('change', () => {
+  state.settings.handSide = dom.selectHandSide.value;
+  saveState();
+});
+
+// URL checkers for modal and zone editor
+setupUrlChecker(dom.modalZoneUrl, dom.modalUrlFeedback);
+setupUrlChecker(dom.inputZoneUrl, dom.zoneUrlFeedback);
+
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
@@ -1034,6 +1249,11 @@ function init() {
   dom.valDebounceSwitch.textContent = state.settings.debounceSwitchMs;
   dom.sliderDebounceMsg.value = state.settings.debounceMessageMs;
   dom.valDebounceMsg.textContent = state.settings.debounceMessageMs;
+
+  // Apply loaded settings to detection mode controls
+  dom.selectDetectionMode.value = state.settings.detectionMode;
+  dom.selectHandSide.value = state.settings.handSide;
+  updateDetectionModeUI();
 
   renderZonesList();
   dom.sbZones.textContent = state.zones.length;
