@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#000000">
+  <title>Laser Pointer - Presenter</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+</head>
+<body class="present-mode">
+
+  <!-- Notification bar (slides down when navigation is pending) -->
+  <div class="presenter-bar" id="presenter-bar">
+    <span class="presenter-bar-label" id="bar-label">Navigating...</span>
+    <div class="presenter-bar-progress">
+      <div class="presenter-bar-fill" id="bar-fill"></div>
+    </div>
+    <span class="presenter-bar-cancel" id="bar-cancel">Cancel</span>
+  </div>
+
+  <!-- Content container -->
+  <div class="presenter-container">
+    <div class="presenter-empty" id="presenter-empty">
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+        <path d="M6 12h8l4-6h8l4 6h8a2 2 0 012 2v16a2 2 0 01-2 2H6a2 2 0 01-2-2V14a2 2 0 012-2z" stroke="currentColor" stroke-width="1.5" opacity=".4"/>
+        <circle cx="20" cy="22" r="6" stroke="currentColor" stroke-width="1.5" opacity=".4"/>
+      </svg>
+      <span>Waiting for laser input</span>
+      <span class="hint">Point a laser at a configured zone to navigate</span>
+    </div>
+    <iframe
+      id="presenter-frame"
+      class="hidden"
+      src="about:blank"
+      allow="autoplay; fullscreen; encrypted-media"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-presentation"
+      referrerpolicy="no-referrer-when-downgrade"
+    ></iframe>
+  </div>
+
+  <script src="present.js"></script>
+
+</body>
+</html>
