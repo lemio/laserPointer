@@ -724,3 +724,14 @@ body.present-mode {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── URL feedback ── */
+.url-feedback {
+  font-size: 10px;
+  min-height: 14px;
+  padding-top: 2px;
+}
+.url-feedback.ok      { color: var(--success); }
+.url-feedback.error   { color: var(--danger); }
+.url-feedback.warn    { color: var(--warning); }
+.url-feedback.checking { color: var(--text-muted); }
